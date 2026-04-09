@@ -1,0 +1,104 @@
+name: Build Patched APK
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install apktool
+        run: |
+          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
+          wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O apktool
+          chmod +x apktool
+          sudo mv apktool /usr/local/bin/apktool
+          sudo mv apktool.jar /usr/local/bin/apktool.jar
+
+      - name: Download base APK
+        run: |
+          gh release download base-apk --pattern "*.apk" --dir base/
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Decompile APK
+        run: |
+          APK=$(ls base/*.apk | head -1)
+          echo "APK: $APK"
+          apktool d "$APK" -o decompiled/ --no-res -f
+
+      - name: Apply patch
+        run: python3 patch.py decompiled/
+
+      - name: Rebuild APK
+        run: apktool b decompiled/ -o ghl-patched-unsigned.apk
+
+      - name: Sign APK
+        run: |
+          # Generate a throwaway debug keystore for signing
+          keytool -genkeypair -v \
+            -keystore signing.jks \
+            -alias ghlfix \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=GHL Fix, O=GHL Fix, C=US"
+
+          # Align
+          ${ANDROID_HOME}/build-tools/34.0.0/zipalign -v -p 4 ghl-patched-unsigned.apk ghl-patched-aligned.apk
+
+          # Sign
+          ${ANDROID_HOME}/build-tools/34.0.0/apksigner sign \
+            --ks signing.jks \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --ks-key-alias ghlfix \
+            --out GameHub-Lite-v5.1.4-patched.apk \
+            ghl-patched-aligned.apk
+
+      - name: Verify APK
+        run: ${ANDROID_HOME}/build-tools/34.0.0/apksigner verify --verbose GameHub-Lite-v5.1.4-patched.apk
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameHub-Lite-v5.1.4-patched
+          path: GameHub-Lite-v5.1.4-patched.apk
+
+      - name: Create or update release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          gh release create "$TAG" GameHub-Lite-v5.1.4-patched.apk \
+            --title "GameHub Lite 5.1.4 — Launch Fix" \
+            --notes "$(cat <<'EOF'
+          ## Patch applied
+
+          **Fix:** Game cards now launch correctly on devices not present in GameHub's hardware whitelist (e.g. AYANEO Pocket FIT, any device with \`isGamepad=false\` and no server entry).
+
+          **Root cause:** \`LauncherHelper.fetchStartTypeInfoAndSwitchModeInternal\` returned \`false\` (silently blocking launch) whenever the \`/devices/getUnknownDevices\` or \`/vtouch/startType\` API returned a 404. The exception handler only allowed \`NetUnknownHostException\` (no internet) to proceed — all other errors, including HTTP 404, were treated as hard failures.
+
+          **Change:** Two lines removed from the \`:goto_9\` exception handler in \`LauncherHelper\$fetchStartTypeInfoAndSwitchModeInternal\$2\$1.smali\` (smali_classes5). Any API error now falls through to \`return true\`, proceeding with the current launch settings instead of silently cancelling.
+
+          See [LAUNCH_BUG_REPORT.md](../blob/main/LAUNCH_BUG_REPORT.md) for full root cause analysis.
+          EOF
+          )" \
+            --prerelease 2>/dev/null || \
+          gh release upload "$TAG" GameHub-Lite-v5.1.4-patched.apk --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
