@@ -40,19 +40,26 @@ def apply_patch(path):
     with open(path, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
-    original = list(lines)
     out = []
     i = 0
     removed = 0
     while i < len(lines):
         line = lines[i]
-        # Remove LINE_A immediately followed by LINE_B
-        if line.rstrip() == LINE_A and i + 1 < len(lines) and lines[i + 1].rstrip() == LINE_B:
-            print(f"  Removing line {i+1}: {line.rstrip()}")
-            print(f"  Removing line {i+2}: {lines[i+1].rstrip()}")
-            removed += 2
-            i += 2
-            continue
+        # Match LINE_A optionally followed by a blank line then LINE_B
+        if line.rstrip() == LINE_A:
+            # Look ahead: skip optional blank line to find LINE_B
+            j = i + 1
+            if j < len(lines) and lines[j].strip() == "":
+                j += 1  # skip blank line between the two
+            if j < len(lines) and lines[j].rstrip() == LINE_B:
+                print(f"  Removing line {i+1}: {line.rstrip()}")
+                # Also remove the blank line if it existed between them
+                if j > i + 1:
+                    print(f"  Removing blank line {i+2}")
+                print(f"  Removing line {j+1}: {lines[j].rstrip()}")
+                removed += (j - i) + 1  # instance-of + optional blank + if-eqz
+                i = j + 1
+                continue
         out.append(line)
         i += 1
 
